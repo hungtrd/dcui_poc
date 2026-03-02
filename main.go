@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -22,6 +23,7 @@ const (
 	scrDashboard screenID = iota
 	scrDiagnostics
 	scrRawRender
+	scrList
 )
 
 type focusID int
@@ -41,6 +43,15 @@ type logLine struct {
 	msg string
 }
 
+// list item implements list.DefaultItem interface
+type item struct {
+	title, desc string
+}
+
+func (i item) Title() string       { return i.title }
+func (i item) Description() string { return i.desc }
+func (i item) FilterValue() string { return i.title }
+
 type model struct {
 	scr     screenID
 	w, h    int
@@ -51,6 +62,7 @@ type model struct {
 	logs    []logLine
 	term    string
 	profile termenv.Profile
+	list    list.Model
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +134,24 @@ func initialModel() model {
 	dns.Width = 15
 	dns.Validate = validIPChars
 
+	items := []list.Item{
+		item{title: "Raspberry Pi (4sp)", desc: "sp = sp"},
+		item{title: "Nokia 5110", desc: "The Nokia 5110 is a basic GSM mobile phone"},
+		item{title: "Game Boy", desc: "The Game Boy is an 8-bit handheld game console"},
+		item{title: "Floppy Disk", desc: "A floppy disk is a magnetic storage medium"},
+		item{title: "VHS Tape", desc: "VHS is a standard for consumer-level analog video recording"},
+		item{title: "Walkman", desc: "The Walkman is a portable cassette player"},
+		item{title: "CRT Monitor", desc: "A cathode-ray tube display device"},
+		item{title: "Dial-up Modem", desc: "A modem that connects to the internet via telephone line"},
+		item{title: "Pager", desc: "A wireless telecommunications device for receiving messages"},
+		item{title: "Typewriter", desc: "A mechanical device for writing characters"},
+	}
+
+	delegate := list.NewDefaultDelegate()
+	l := list.New(items, delegate, 80, 24)
+	l.Title = "Retro Tech Collection"
+	l.SetShowHelp(true)
+
 	m := model{
 		scr:    scrDashboard,
 		w:      80,
@@ -131,6 +161,7 @@ func initialModel() model {
 		uni:    true,
 		col:    true,
 		term:   os.Getenv("TERM"),
+		list:   l,
 	}
 
 	// Detect color profile from the environment / terminal.
@@ -153,6 +184,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.w = msg.Width
 		m.h = msg.Height
+		m.list.SetSize(msg.Width, msg.Height)
 		m.addLog(fmt.Sprintf("Resize %d×%d", m.w, m.h))
 		return m, nil
 
@@ -160,7 +192,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 
-	// Forward non-key messages (e.g. cursor blink) to focused input.
+	// Forward non-key messages to the appropriate component.
+	if m.scr == scrList {
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd
+	}
 	if m.scr == scrDashboard && m.focus <= fDNS {
 		var cmd tea.Cmd
 		m.inputs[m.focus], cmd = m.inputs[m.focus].Update(msg)
@@ -178,6 +215,8 @@ func (m model) View() string {
 		return m.viewDiagnostics()
 	case scrRawRender:
 		return m.viewRawRender()
+	case scrList:
+		return m.viewList()
 	default:
 		return m.viewDashboard()
 	}
@@ -191,6 +230,24 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// ctrl+c always quits.
 	if msg.Type == tea.KeyCtrlC {
 		return m, tea.Quit
+	}
+
+	// When on the list screen, forward keys to the list component,
+	// except for esc/1 to go back to dashboard.
+	if m.scr == scrList {
+		switch msg.String() {
+		case "esc":
+			m.scr = scrDashboard
+			m.addLog("Screen -> Dashboard")
+			return m, nil
+		case "1":
+			m.scr = scrDashboard
+			m.addLog("Screen -> Dashboard")
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd
 	}
 
 	// When a text input is focused on the dashboard, only intercept
@@ -238,6 +295,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.scr != scrRawRender {
 			m.scr = scrRawRender
 			m.addLog("Screen -> Raw Render")
+		}
+	case "s":
+		if m.scr != scrList {
+			m.scr = scrList
+			m.list.SetSize(m.w, m.h)
+			m.addLog("Screen -> List")
 		}
 	case "1":
 		if m.scr != scrDashboard {
@@ -486,7 +549,7 @@ func (m model) viewDashboard() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, rightPanel)
 
 	// ── footer ──
-	help := "Tab/S-Tab:focus  Enter:select  q:quit  d:diag  r:raw  u:unicode  c:colors  l:clear-log"
+	help := "Tab/S-Tab:focus  Enter:select  q:quit  d:diag  r:raw  s:list  u:unicode  c:colors  l:clear-log"
 	footer := m.footerStyle().Width(m.w - 2).Render(help)
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, body, footer)
@@ -665,6 +728,14 @@ func (m model) viewRawRender() string {
 	help := "Esc/1:dashboard  u:toggle-unicode  c:toggle-colors  q:quit"
 	b.WriteString(m.footerStyle().Width(m.w - 2).Render(help))
 	return b.String()
+}
+
+// ---------------------------------------------------------------------------
+// List view
+// ---------------------------------------------------------------------------
+
+func (m model) viewList() string {
+	return m.list.View()
 }
 
 // ---------------------------------------------------------------------------
